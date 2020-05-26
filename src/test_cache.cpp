@@ -17,6 +17,8 @@ struct WithIntKey
         : key(key_)
     { }
 
+    virtual ~WithIntKey() = default;
+
     bool operator == (const int other_key) const
     { return key == other_key; }
 };

@@ -2,6 +2,7 @@
 
 #include <gtest/gtest.h>
 
+#include <unordered_map>
 #include <vector>
 
 namespace {
@@ -66,6 +67,29 @@ struct AllocatorTest : ::testing::Test
 
     PoolAllocator alloc;
 
+    std::unordered_map<const void *, PoolAllocator::pointer> ptr_mapping;
+
+    void * create(const std::size_t size)
+    {
+        auto aptr = alloc.allocate(size);
+        ptr_mapping.emplace(*aptr, aptr);
+        return *aptr;
+    }
+
+    void destroy(const void * ptr)
+    {
+        if (ptr != nullptr) {
+            const auto it = ptr_mapping.find(ptr);
+            if (it != ptr_mapping.end()) {
+                alloc.deallocate(it->second);
+                ptr_mapping.erase(ptr);
+            }
+            else {
+                FAIL();
+            }
+        }
+    }
+
     AllocatorTest()
         : alloc(pool_size)
     {}
@@ -74,28 +98,28 @@ struct AllocatorTest : ::testing::Test
 
     D * create_dummy()
     {
-        return new (alloc.allocate(sizeof(D))) D;
+        return new (create(sizeof(D))) D;
     }
 
-    void destroy_dummy(const D * ptr)
+    void destroy_dummy(D * ptr)
     {
         if (ptr != nullptr) {
             ptr->~D();
         }
-        alloc.deallocate(ptr);
+        destroy(ptr);
     }
 
     Complex * create_complex(const int a, char & b, const double c)
     {
-        return new (alloc.allocate(sizeof(Complex))) Complex(a, b, c);
+        return new (create(sizeof(Complex))) Complex(a, b, c);
     }
 
-    void destroy_complex(const Complex * ptr)
+    void destroy_complex(Complex * ptr)
     {
         if (ptr != nullptr) {
             ptr->~Complex();
         }
-        alloc.deallocate(ptr);
+        destroy(ptr);
     }
 };
 
@@ -115,7 +139,7 @@ TYPED_TEST(AllocatorTest, single_complex)
 {
     char x = '@';
     if (this->pool_size >= sizeof(Complex)) {
-        const auto * ptr = this->create_complex(-511, x, 0.05);
+        auto * ptr = this->create_complex(-511, x, 0.05);
         EXPECT_EQ(-511, ptr->a);
         EXPECT_EQ('@', ptr->b);
         EXPECT_EQ(0.05, ptr->c);
@@ -137,7 +161,7 @@ TYPED_TEST(AllocatorTest, full_dummy)
     }
     EXPECT_THROW(this->create_dummy(), std::bad_alloc);
     EXPECT_THROW(this->create_dummy(), std::bad_alloc);
-    for (const auto ptr : ptrs) {
+    for (auto ptr : ptrs) {
         EXPECT_EQ(199, ptr->data[0]);
         this->destroy_dummy(ptr);
     }
@@ -162,7 +186,7 @@ TYPED_TEST(AllocatorTest, full_complex)
         EXPECT_THROW(this->create_complex(0, x, 0.01), std::bad_alloc);
     }
     n = -11;
-    for (const auto ptr : ptrs) {
+    for (auto ptr : ptrs) {
         EXPECT_EQ(n, ptr->a);
         EXPECT_EQ(x, ptr->b);
         EXPECT_EQ(d, ptr->c);
@@ -200,13 +224,13 @@ TYPED_TEST(AllocatorTest, full_mixed)
     if (this->pool_size >= sizeof(Complex)) {
         EXPECT_THROW(this->create_complex(0, x, 0.01), std::bad_alloc);
     }
-    for (const auto ptr : c_ptrs) {
+    for (auto ptr : c_ptrs) {
         EXPECT_EQ(n, ptr->a);
         EXPECT_EQ(x, ptr->b);
         EXPECT_EQ(d, ptr->c);
         this->destroy_complex(ptr);
     }
-    for (const auto ptr : d_ptrs) {
+    for (auto ptr : d_ptrs) {
         EXPECT_EQ(u, ptr->data[0]);
         this->destroy_dummy(ptr);
     }
@@ -237,14 +261,14 @@ TYPED_TEST(AllocatorTest, dummy_fragmentation)
         available -= sizeof(Complex);
     }
 
-    for (const auto ptr : d_ptrs) {
+    for (auto ptr : d_ptrs) {
         if (ptr != nullptr) {
             EXPECT_TRUE(ptr->check());
         }
         this->destroy_dummy(ptr);
     }
     n = 0;
-    for (const auto ptr : c_ptrs) {
+    for (auto ptr : c_ptrs) {
         EXPECT_EQ(n, ptr->a);
         EXPECT_EQ(x, ptr->b);
         EXPECT_EQ(d, ptr->c);
@@ -280,7 +304,7 @@ TYPED_TEST(AllocatorTest, complex_fragmentation)
     }
 
     n = 0;
-    for (const auto ptr : c_ptrs) {
+    for (auto ptr : c_ptrs) {
         if (ptr != nullptr) {
             EXPECT_EQ(n, ptr->a);
             EXPECT_EQ(x, ptr->b);
@@ -289,7 +313,7 @@ TYPED_TEST(AllocatorTest, complex_fragmentation)
         this->destroy_complex(ptr);
         ++n;
     }
-    for (const auto ptr : d_ptrs) {
+    for (auto ptr : d_ptrs) {
         EXPECT_TRUE(ptr->check());
         this->destroy_dummy(ptr);
     }
