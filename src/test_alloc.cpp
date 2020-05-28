@@ -2,6 +2,8 @@
 
 #include <gtest/gtest.h>
 
+#include <cstddef>
+#include <optional>
 #include <unordered_map>
 #include <vector>
 
@@ -60,6 +62,36 @@ struct Params
     static constexpr std::size_t count = Count;
 };
 
+template <class T>
+class Pointer
+{
+    std::optional<PoolAllocator::pointer> m_ptr;
+public:
+    Pointer() = default;
+
+    Pointer(const PoolAllocator::pointer ptr)
+        : m_ptr(ptr)
+    {}
+
+    Pointer & operator = (const std::nullptr_t)
+    {
+        m_ptr.reset();
+        return *this;
+    }
+
+    explicit operator bool () const
+    { return m_ptr.has_value(); }
+
+    PoolAllocator::pointer get() const
+    { return m_ptr.value(); }
+
+    T * operator -> () const
+    { return static_cast<T *>(**m_ptr); }
+
+    T & operator * () const
+    { return *static_cast<T *>(**m_ptr); }
+};
+
 template <class P>
 struct AllocatorTest : ::testing::Test
 {
@@ -67,26 +99,20 @@ struct AllocatorTest : ::testing::Test
 
     PoolAllocator alloc;
 
-    std::unordered_map<const void *, PoolAllocator::pointer> ptr_mapping;
-
-    void * create(const std::size_t size)
+    template <class T, class... Args>
+    Pointer<T> create(Args &&... args)
     {
-        auto aptr = alloc.allocate(size);
-        ptr_mapping.emplace(*aptr, aptr);
-        return *aptr;
+        auto aptr = alloc.allocate(sizeof(T));
+        new (*aptr) T(std::forward<Args>(args)...);
+        return aptr;
     }
 
-    void destroy(const void * ptr)
+    template <class T>
+    void destroy(const Pointer<T> ptr)
     {
-        if (ptr != nullptr) {
-            const auto it = ptr_mapping.find(ptr);
-            if (it != ptr_mapping.end()) {
-                alloc.deallocate(it->second);
-                ptr_mapping.erase(ptr);
-            }
-            else {
-                FAIL();
-            }
+        if (ptr) {
+            ptr->~T();
+            alloc.deallocate(ptr.get());
         }
     }
 
@@ -95,30 +121,27 @@ struct AllocatorTest : ::testing::Test
     {}
 
     using D = Dummy<P::size>;
+    using DPtr = Pointer<D>;
 
-    D * create_dummy()
+    DPtr create_dummy()
     {
-        return new (create(sizeof(D))) D;
+        return create<D>();
     }
 
-    void destroy_dummy(D * ptr)
+    void destroy_dummy(const DPtr ptr)
     {
-        if (ptr != nullptr) {
-            ptr->~D();
-        }
         destroy(ptr);
     }
 
-    Complex * create_complex(const int a, char & b, const double c)
+    using CPtr = Pointer<Complex>;
+
+    CPtr create_complex(const int a, char & b, const double c)
     {
-        return new (create(sizeof(Complex))) Complex(a, b, c);
+        return create<Complex>(a, b, c);
     }
 
-    void destroy_complex(Complex * ptr)
+    void destroy_complex(const CPtr ptr)
     {
-        if (ptr != nullptr) {
-            ptr->~Complex();
-        }
         destroy(ptr);
     }
 };
@@ -130,7 +153,7 @@ TYPED_TEST_SUITE(AllocatorTest, TestedTypes);
 
 TYPED_TEST(AllocatorTest, single_dummy)
 {
-    auto * ptr = this->create_dummy();
+    auto ptr = this->create_dummy();
     ptr->data[0] = 112;
     this->destroy_dummy(ptr);
 }
@@ -139,7 +162,7 @@ TYPED_TEST(AllocatorTest, single_complex)
 {
     char x = '@';
     if (this->pool_size >= sizeof(Complex)) {
-        auto * ptr = this->create_complex(-511, x, 0.05);
+        auto ptr = this->create_complex(-511, x, 0.05);
         EXPECT_EQ(-511, ptr->a);
         EXPECT_EQ('@', ptr->b);
         EXPECT_EQ(0.05, ptr->c);
@@ -155,7 +178,7 @@ TYPED_TEST(AllocatorTest, full_dummy)
     using Ptr = decltype(this->create_dummy());
     std::vector<Ptr> ptrs;
     for (std::size_t i = 0; i < TypeParam::count; ++i) {
-        auto * ptr = this->create_dummy();
+        auto ptr = this->create_dummy();
         ptr->data[0] = 199;
         ptrs.push_back(ptr);
     }
@@ -170,13 +193,14 @@ TYPED_TEST(AllocatorTest, full_dummy)
 
 TYPED_TEST(AllocatorTest, full_complex)
 {
+    using Ptr = decltype(this->create_complex(1, std::declval<char &>(), 0.1));
     const std::size_t complex_count = this->pool_size / sizeof(Complex);
-    std::vector<Complex *> ptrs;
+    std::vector<Ptr> ptrs;
     char x = 'X';
     int n = -11;
     const double d = 1.11e-3;
     for (std::size_t i = 0; i < complex_count; ++i, --n) {
-        auto * ptr = this->create_complex(n, x, d);
+        auto ptr = this->create_complex(n, x, d);
         EXPECT_EQ(n, ptr->a);
         EXPECT_EQ(x, ptr->b);
         EXPECT_EQ(d, ptr->c);
@@ -200,9 +224,10 @@ TYPED_TEST(AllocatorTest, full_complex)
 
 TYPED_TEST(AllocatorTest, full_mixed)
 {
-    using Ptr = decltype(this->create_dummy());
-    std::vector<Ptr> d_ptrs;
-    std::vector<Complex *> c_ptrs;
+    using DPtr = decltype(this->create_dummy());
+    using CPtr = decltype(this->create_complex(1, std::declval<char &>(), 0.1));
+    std::vector<DPtr> d_ptrs;
+    std::vector<CPtr> c_ptrs;
     char x = '7';
     const double d = 100.99;
     const int n = -113;
@@ -238,8 +263,9 @@ TYPED_TEST(AllocatorTest, full_mixed)
 
 TYPED_TEST(AllocatorTest, dummy_fragmentation)
 {
-    using Ptr = decltype(this->create_dummy());
-    std::vector<Ptr> d_ptrs;
+    using DPtr = decltype(this->create_dummy());
+    using CPtr = decltype(this->create_complex(1, std::declval<char &>(), 0.1));
+    std::vector<DPtr> d_ptrs;
     for (std::size_t i = 0; i < TypeParam::count; ++i) {
         d_ptrs.push_back(this->create_dummy());
     }
@@ -254,7 +280,7 @@ TYPED_TEST(AllocatorTest, dummy_fragmentation)
     char x = ' ';
     const double d = 0xF.Fp10;
     int n = 0;
-    std::vector<Complex *> c_ptrs;
+    std::vector<CPtr> c_ptrs;
     while (available >= 2 * sizeof(Complex)) {
         EXPECT_NO_THROW(c_ptrs.push_back(this->create_complex(n, x, d)));
         ++n;
@@ -262,7 +288,7 @@ TYPED_TEST(AllocatorTest, dummy_fragmentation)
     }
 
     for (auto ptr : d_ptrs) {
-        if (ptr != nullptr) {
+        if (ptr) {
             EXPECT_TRUE(ptr->check());
         }
         this->destroy_dummy(ptr);
@@ -279,11 +305,13 @@ TYPED_TEST(AllocatorTest, dummy_fragmentation)
 
 TYPED_TEST(AllocatorTest, complex_fragmentation)
 {
+    using DPtr = decltype(this->create_dummy());
+    using CPtr = decltype(this->create_complex(1, std::declval<char &>(), 0.1));
     const std::size_t complex_num = this->pool_size / sizeof(Complex);
     char x = ' ';
     const double d = 0xF.Fp10;
     int n = 0;
-    std::vector<Complex *> c_ptrs;
+    std::vector<CPtr> c_ptrs;
     for (std::size_t i = 0; i < complex_num; ++i) {
         c_ptrs.push_back(this->create_complex(n, x, d));
         ++n;
@@ -296,8 +324,7 @@ TYPED_TEST(AllocatorTest, complex_fragmentation)
         available += sizeof(Complex);
     }
 
-    using Ptr = decltype(this->create_dummy());
-    std::vector<Ptr> d_ptrs;
+    std::vector<DPtr> d_ptrs;
     while (available >= 2 * TypeParam::size) {
         EXPECT_NO_THROW(d_ptrs.push_back(this->create_dummy()));
         available -= TypeParam::size;
@@ -305,7 +332,7 @@ TYPED_TEST(AllocatorTest, complex_fragmentation)
 
     n = 0;
     for (auto ptr : c_ptrs) {
-        if (ptr != nullptr) {
+        if (ptr) {
             EXPECT_EQ(n, ptr->a);
             EXPECT_EQ(x, ptr->b);
             EXPECT_EQ(d, ptr->c);
